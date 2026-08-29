@@ -1,0 +1,6 @@
+include README.md
+include RELEASING.md
+include package.xml
+include resource/beetea
+recursive-exclude beetea/examples *
+global-exclude __pycache__ *.py[cod]

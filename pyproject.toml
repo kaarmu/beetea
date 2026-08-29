@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "beetea"
+dynamic = ["version"]
+description = "Reactive behavior trees with optional ROS 2 transport support"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Kaj Munhoz Arfvidsson", email = "kajarf@kth.se" },
+]
+maintainers = [
+  { name = "Kaj Munhoz Arfvidsson", email = "kajarf@kth.se" },
+]
+keywords = ["behavior-tree", "robotics", "ros2"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+release = ["build>=1.2", "twine>=6"]
+
+[tool.setuptools.dynamic]
+version = { attr = "beetea.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["beetea"]
+
+[tool.setuptools.data-files]
+"share/ament_index/resource_index/packages" = ["resource/beetea"]
+"share/beetea" = ["package.xml"]
+
+[tool.pytest.ini_options]
+testpaths = ["beetea/tests"]
