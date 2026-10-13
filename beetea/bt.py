@@ -50,13 +50,16 @@ _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bt-action")
 _logger = logging.getLogger(__name__)
 
 
-class AmbiguousNodeError(ValueError):
-    """Indicate that label-based lookup matched more than one node."""
-
-
 def _new_id() -> str:
     """Create a process-local ID for nodes without an explicit identity."""
     return f"node-{next(_id_counter)}"
+
+
+def _check_id(id: str) -> str:
+    """Reject IDs that cannot be written in the program format."""
+    if not id or any(character.isspace() for character in id):
+        raise ValueError("BTNode IDs must be non-empty and contain no whitespace")
+    return id
 
 
 def node_identity(node: BTNode) -> int:
@@ -92,17 +95,14 @@ class BTNode:
     synchronously in the thread that changes the status.
     """
 
-    def __init__(self, label: str | None = None, id: str | None = None):
+    def __init__(self, id: str | None = None):
         """Initialize node identity and inactive status.
 
         Args:
-            label: Optional whitespace-free human-readable name. Labels need
-                not be unique.
-            id: Stable machine-readable identity. A process-local ID is
-                generated when omitted.
+            id: Optional whitespace-free name, unique within a tree. A
+                process-local ID is generated when omitted.
         """
-        self.label = label
-        self._id = id or _new_id()
+        self._id = _check_id(id) if id is not None else _new_id()
         self._status = BTStatus.SKIPPED
         self._status_listeners: list[Callable[[BTNode, BTStatus, BTStatus], None]] = []
 
@@ -110,17 +110,6 @@ class BTNode:
     def id(self) -> str:
         """Return the stable identity used by lookup, events, and snapshots."""
         return self._id
-
-    @property
-    def label(self) -> str | None:
-        """Return the optional whitespace-free human-readable identity."""
-        return self._label
-
-    @label.setter
-    def label(self, label: str | None) -> None:
-        if label is not None and any(character.isspace() for character in label):
-            raise ValueError("BTNode labels must not contain whitespace")
-        self._label = label
 
     def tick(self) -> BTResponse:
         """Evaluate one non-blocking step.
@@ -183,7 +172,7 @@ class BTNode:
     def get_program(self) -> str:
         """Render the node and its identity in the indented program format."""
         name = self.__class__.__name__.lower()
-        return _format_name(name, self.label, self.id)
+        return _format_name(name, self.id)
 
     def with_children(self, children: tuple[BTNode, ...]) -> BTNode:
         """Return the node rebuilt around ``children``.
@@ -197,10 +186,9 @@ class BTNode:
         raise TypeError(f"{self.__class__.__name__} does not have children")
 
 
-def _format_name(name: str, label: str | None, id: str) -> str:
-    """Format a program line with the most useful available identity."""
-    suffix = f" #{label}" if label else f" ${id}"
-    return f"{name}{suffix}"
+def _format_name(name: str, id: str) -> str:
+    """Format a program line with the node keyword and ID."""
+    return f"{name} #{id}"
 
 
 class Success(BTNode):
@@ -237,16 +225,15 @@ class Condition(BTNode):
     Predicates should therefore be non-blocking and free of long-running I/O.
     """
 
-    def __init__(self, predicate: Callable[[], bool], label: str | None = None, id: str | None = None):
+    def __init__(self, predicate: Callable[[], bool], id: str | None = None):
         """Create a condition around ``predicate``.
 
         Args:
             predicate: Zero-argument callable whose truth value determines the
                 response.
-            label: Optional human-readable name.
-            id: Optional stable machine-readable identity.
+            id: Optional unique, whitespace-free name.
         """
-        super().__init__(label, id)
+        super().__init__(id)
         self.predicate = predicate
 
     def tick(self) -> BTResponse:
@@ -257,7 +244,7 @@ class Condition(BTNode):
 
     def get_program(self) -> str:
         """Render the node using its behavior-tree keyword."""
-        return _format_name("condition", self.label, self.id)
+        return _format_name("condition", self.id)
 
 
 class Action(BTNode):
@@ -271,16 +258,14 @@ class Action(BTNode):
     to failure.
     """
 
-    def __init__(self, action: Callable[[], bool | BTResponse | None], label: str | None = None, id: str | None = None):
+    def __init__(self, action: Callable[[], bool | BTResponse | None], id: str | None = None):
         """Create an asynchronous callable leaf.
 
         Args:
             action: Zero-argument callable that eventually succeeds or fails.
-            label: Optional whitespace-free human-readable name. The stable ID
-                is used in program output when no label is supplied.
-            id: Optional stable machine-readable identity.
+            id: Optional unique, whitespace-free name.
         """
-        super().__init__(label, id)
+        super().__init__(id)
         self.action = action
         self._future: Future[BTResponse] | None = None
         self._completed_response: BTResponse | None = None
@@ -360,8 +345,8 @@ class Action(BTNode):
         self._set_status(BTStatus.SKIPPED)
 
     def get_program(self) -> str:
-        """Render the explicit label or stable ID for diagnostics."""
-        return _format_name("action", self.label, self.id)
+        """Render the node ID for diagnostics."""
+        return _format_name("action", self.id)
 
 
 class Composite(BTNode):
@@ -371,15 +356,14 @@ class Composite(BTNode):
     so stateful work cannot continue outside the active branch.
     """
 
-    def __init__(self, children: tuple[BTNode, ...] = (), label: str | None = None, id: str | None = None):
+    def __init__(self, children: tuple[BTNode, ...] = (), id: str | None = None):
         """Create a composite with a fixed evaluation order.
 
         Args:
             children: Nodes in the order they should be evaluated.
-            label: Optional human-readable name.
-            id: Optional stable machine-readable identity.
+            id: Optional unique, whitespace-free name.
         """
-        super().__init__(label, id)
+        super().__init__(id)
         self._children = tuple(children)
 
     def children(self) -> tuple[BTNode, ...]:
@@ -401,11 +385,11 @@ class Composite(BTNode):
 
     def with_children(self, children: tuple[BTNode, ...]) -> BTNode:
         """Rebuild the same composite type for structural replacement."""
-        return type(self)(children, label=self.label, id=self.id)
+        return type(self)(children, id=self.id)
 
     def get_program(self) -> str:
         """Render the composite followed by its indented child programs."""
-        lines = [_format_name(self.__class__.__name__.lower(), self.label, self.id)]
+        lines = [_format_name(self.__class__.__name__.lower(), self.id)]
         for child in self._children:
             lines.extend("  " + line for line in child.get_program().splitlines())
         return "\n".join(lines)
@@ -528,7 +512,6 @@ class BehaviorTree(BTNode):
         root: BTNode,
         *,
         tick_rate: float | None = None,
-        label: str | None = None,
         id: str | None = None,
     ):
         """Create a tree around ``root``.
@@ -537,8 +520,7 @@ class BehaviorTree(BTNode):
             root: Root node evaluated by this tree.
             tick_rate: Independent tick frequency in hertz. ``None`` selects
                 synchronous manual propagation.
-            label: Optional human-readable name for the tree node.
-            id: Optional stable machine-readable identity for the tree node.
+            id: Optional unique, whitespace-free name for the tree node.
 
         Raises:
             TypeError: If ``root`` is not a :class:`BTNode`.
@@ -551,7 +533,7 @@ class BehaviorTree(BTNode):
             tick_rate = float(tick_rate)
             if not math.isfinite(tick_rate) or tick_rate <= 0:
                 raise ValueError("tick_rate must be positive or None")
-        super().__init__(label=label, id=id)
+        super().__init__(id=id)
         self._tick_rate = tick_rate
         self._tree_status_listeners: list[Callable[[int, BTNode, BTStatus, BTStatus], None]] = []
         self._structure_listeners: list[Callable[[int, str], None]] = []
@@ -609,7 +591,7 @@ class BehaviorTree(BTNode):
             children: Exactly one node to use as the new root.
 
         Returns:
-            A new tree with the same ID, label, and tick rate.
+            A new tree with the same ID and tick rate.
 
         Raises:
             ValueError: If ``children`` does not contain exactly one node.
@@ -619,7 +601,6 @@ class BehaviorTree(BTNode):
         return type(self)(
             children[0],
             tick_rate=self.tick_rate,
-            label=self.label,
             id=self.id,
         )
 
@@ -802,33 +783,26 @@ class BehaviorTree(BTNode):
         """
         return walk(self)
 
-    def find(self, *, id: str | None = None, label: str | None = None) -> BTNode:
-        """Find exactly one node by stable ID or unambiguous label.
+    def find(self, id: str) -> BTNode:
+        """Find the node with ``id``.
 
         Args:
-            id: Stable node ID to match.
-            label: Human-readable label to match.
+            id: Node ID to match.
 
         Returns:
             The matching node, including this tree node when applicable.
 
         Raises:
-            ValueError: If both selectors or neither selector is provided.
-            KeyError: If no node matches the selector.
-            AmbiguousNodeError: If a label matches multiple nodes.
+            KeyError: If no node has the ID.
         """
-        if (id is None) == (label is None):
-            raise ValueError("provide exactly one of id or label")
         with self._state_lock:
             nodes = (self,) + self._state.nodes
-        matches = [node for node in nodes if node.id == id] if id is not None else [node for node in nodes if node.label == label]
-        if not matches:
-            raise KeyError(id if id is not None else label)
-        if len(matches) > 1:
-            raise AmbiguousNodeError(f"label {label!r} matches multiple nodes")
-        return matches[0]
+        for node in nodes:
+            if node.id == id:
+                return node
+        raise KeyError(id)
 
-    def replace(self, subtree: BTNode, *, id: str | None = None, label: str | None = None) -> None:
+    def replace(self, subtree: BTNode, id: str) -> None:
         """Replace one subtree while preserving unaffected node instances.
 
         Replacement is serialized with ticking. Removed active nodes are
@@ -838,16 +812,14 @@ class BehaviorTree(BTNode):
 
         Args:
             subtree: Node to install at the selected location.
-            id: Stable ID of the node to replace.
-            label: Unambiguous label of the node to replace.
+            id: ID of the node to replace.
 
         Raises:
-            ValueError: If selectors are invalid, the tree itself is selected,
-                or the resulting structure contains duplicate IDs.
-            KeyError: If no node matches the selector.
-            AmbiguousNodeError: If a label matches multiple nodes.
+            ValueError: If the tree itself is selected or the resulting
+                structure contains duplicate IDs.
+            KeyError: If no node has the ID.
         """
-        target = self.find(id=id, label=label)
+        target = self.find(id)
         if target is self:
             raise ValueError("a BehaviorTree cannot replace itself")
         with self._tick_lock:
@@ -891,7 +863,7 @@ class BehaviorTree(BTNode):
 
     def get_program(self) -> str:
         """Render this tree and its descendants as an indented program."""
-        lines = [_format_name("behaviortree", self.label, self.id)]
+        lines = [_format_name("behaviortree", self.id)]
         lines.extend("  " + line for line in self.root.get_program().splitlines())
         return "\n".join(lines)
 
@@ -923,7 +895,6 @@ class BehaviorTree(BTNode):
             """Recursively serialize one node and its descendants."""
             result = {
                 "id": node.id,
-                "label": node.label,
                 "type": type(node).__name__,
                 "status": node.get_status().name,
                 "children": [describe(child) for child in node.children()],
@@ -974,8 +945,7 @@ def parse_bt(text: str, symbols: Mapping[str, Callable[[], BTNode] | BTNode]) ->
     Built-in keywords are ``sequence``, ``fallback``, ``success``, ``failure``,
     and ``running``. Children are indented by exactly two spaces. A token such
     as ``$navigate`` resolves through ``symbols``; the mapped value may be a
-    node or a zero-argument node factory. ``#label`` or ``$id`` may follow a
-    node token.
+    node or a zero-argument node factory. ``#id`` may follow a node token.
 
     Args:
         text: Program text containing exactly one root.
@@ -985,7 +955,7 @@ def parse_bt(text: str, symbols: Mapping[str, Callable[[], BTNode] | BTNode]) ->
         The parsed root node.
 
     Raises:
-        ValueError: If syntax, indentation, labels, or node IDs are invalid.
+        ValueError: If syntax, indentation, or node IDs are invalid.
         KeyError: If a referenced symbol is absent.
         TypeError: If a symbol does not resolve to a :class:`BTNode`.
     """
@@ -1010,13 +980,8 @@ def parse_bt(text: str, symbols: Mapping[str, Callable[[], BTNode] | BTNode]) ->
         parts = token.split()
         keyword = parts[0]
         identity = parts[1] if len(parts) == 2 else None
-        label = identity[1:] if identity and identity.startswith("#") else None
-        node_id = identity[1:] if identity and identity.startswith("$") else None
-        if (
-            len(parts) > 2
-            or (identity is not None and label is None and node_id is None)
-            or identity in ("#", "$")
-        ):
+        node_id = identity[1:] if identity is not None else None
+        if len(parts) > 2 or (identity is not None and (not identity.startswith("#") or not node_id)):
             raise ValueError(f"line {line_number}: invalid syntax: {token}")
         index += 1
         children: list[BTNode] = []
@@ -1028,15 +993,15 @@ def parse_bt(text: str, symbols: Mapping[str, Callable[[], BTNode] | BTNode]) ->
                 children.append(child)
         if keyword in ("sequence", "fallback"):
             node_type = Sequence if keyword == "sequence" else Fallback
-            return node_type(tuple(children), label=label, id=node_id), index
+            return node_type(tuple(children), id=node_id), index
         if children:
             raise ValueError(f"line {line_number}: leaf nodes cannot have children")
         if keyword == "success":
-            return Success(label=label, id=node_id), index
+            return Success(id=node_id), index
         if keyword == "failure":
-            return Failure(label=label, id=node_id), index
+            return Failure(id=node_id), index
         if keyword == "running":
-            return Running(label=label, id=node_id), index
+            return Running(id=node_id), index
         if keyword.startswith("$") and len(keyword) > 1:
             if keyword[1:] not in symbols:
                 raise KeyError(f"line {line_number}: unknown symbol {keyword[1:]!r}")
@@ -1044,11 +1009,6 @@ def parse_bt(text: str, symbols: Mapping[str, Callable[[], BTNode] | BTNode]) ->
             node = symbol() if callable(symbol) else symbol
             if not isinstance(node, BTNode):
                 raise TypeError(f"line {line_number}: symbol must produce a BTNode")
-            if label is not None:
-                if callable(symbol):
-                    node.label = label
-                elif node.label != label:
-                    raise ValueError(f"line {line_number}: labels cannot override a node instance")
             if node_id is not None:
                 if callable(symbol):
                     node._id = node_id
@@ -1069,7 +1029,7 @@ parse_tree = parse_bt
 
 
 __all__ = [
-    "AmbiguousNodeError", "BTNode", "BTResponse", "BTStatus", "BTSnapshot",
+    "BTNode", "BTResponse", "BTStatus", "BTSnapshot",
     "Action", "BehaviorTree", "Condition", "Failure", "Fallback", "Running",
     "Sequence", "Success", "parse_bt", "parse_tree", "walk",
 ]

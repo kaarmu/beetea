@@ -3,7 +3,6 @@ import time
 import unittest
 
 from beetea.bt import (
-    AmbiguousNodeError,
     Action,
     BTNode,
     BTResponse,
@@ -36,7 +35,7 @@ class BehaviorTreeTests(unittest.TestCase):
     def test_sequence_is_reactive_and_skips_later_children(self):
         ready = [True]
         calls = []
-        action = Running(label="action")
+        action = Running(id="action")
         tree = BehaviorTree(Sequence((Condition(lambda: ready[0]), action)))
         self.assertEqual(tree.root.tick(), BTResponse.RUNNING)
         ready[0] = False
@@ -79,8 +78,8 @@ class BehaviorTreeTests(unittest.TestCase):
         node.halt()
 
     def test_completed_action_is_sticky_in_reactive_sequence(self):
-        first = Action(lambda: True, label="first")
-        second = Running(label="second")
+        first = Action(lambda: True, id="first")
+        second = Running(id="second")
         tree = BehaviorTree(Sequence((first, second)))
         self.assertEqual(tree.root.tick(), BTResponse.RUNNING)
         deadline = time.monotonic() + 1
@@ -152,7 +151,7 @@ class BehaviorTreeTests(unittest.TestCase):
         self.assertIs(node.last_exception, error)
 
     def test_replacement_lookup_events_and_snapshot(self):
-        old = Running(label="work", id="work-id")
+        old = Running(id="work-id")
         tree = BehaviorTree(Sequence((Success(id="first"), old), id="root"))
         status_events = []
         structure_events = []
@@ -160,9 +159,9 @@ class BehaviorTreeTests(unittest.TestCase):
         tree.add_structure_listener(lambda *event: structure_events.append(event))
         tree.add_tree_status_listener(lambda *event: status_events.append(event))
         self.assertEqual(tree.root.tick(), BTResponse.RUNNING)
-        tree.replace(Failure(label="new"), id="work-id")
+        tree.replace(Failure(id="new"), "work-id")
         self.assertEqual(tree.revision, 1)
-        self.assertEqual(tree.find(label="new").get_status(), BTStatus.SKIPPED)
+        self.assertEqual(tree.find("new").get_status(), BTStatus.SKIPPED)
         self.assertEqual(tree.root.children()[0].id, "first")
         self.assertEqual(old.get_status(), BTStatus.SKIPPED)
         self.assertEqual(len(structure_events), 1)
@@ -172,54 +171,52 @@ class BehaviorTreeTests(unittest.TestCase):
         self.assertTrue(status_events)
 
     def test_replacement_does_not_halt_reused_nodes(self):
-        condition = Condition(lambda: True, label="ready")
-        old_action = Running(label="old")
+        condition = Condition(lambda: True, id="ready")
+        old_action = Running(id="old")
         tree = BehaviorTree(Sequence((condition, old_action), id="root"))
         self.assertEqual(tree.root.tick(), BTResponse.RUNNING)
-        new_root = Sequence((condition, Success(label="new")), id="root")
+        new_root = Sequence((condition, Success(id="new")), id="root")
         tree.replace(new_root, id="root")
         self.assertEqual(condition.get_status(), BTStatus.SUCCESS)
         self.assertEqual(old_action.get_status(), BTStatus.SKIPPED)
 
-    def test_duplicate_and_ambiguous_identity_are_rejected(self):
+    def test_duplicate_and_missing_ids_are_rejected(self):
         with self.assertRaises(ValueError):
             BehaviorTree(Sequence((Success(id="same"), Failure(id="same"))))
-        tree = BehaviorTree(Sequence((Success(label="same"), Failure(label="same"))))
-        with self.assertRaises(AmbiguousNodeError):
-            tree.find(label="same")
+        tree = BehaviorTree(Success(id="present"))
+        with self.assertRaises(KeyError):
+            tree.find("absent")
 
-    def test_labels_must_not_contain_whitespace(self):
-        for label in ("two words", "line\nbreak", "tab\tseparated"):
-            with self.subTest(label=label), self.assertRaises(ValueError):
-                Success(label=label)
-        node = Success(label="valid-label")
-        with self.assertRaises(ValueError):
-            node.label = "not valid"
+    def test_ids_must_be_non_empty_without_whitespace(self):
+        for node_id in ("", "two words", "line\nbreak", "tab\tseparated"):
+            with self.subTest(id=node_id), self.assertRaises(ValueError):
+                Success(id=node_id)
 
-    def test_program_distinguishes_labels_and_ids(self):
-        self.assertEqual(Success(label="leaf", id="leaf-id").get_program(), "success #leaf")
-        self.assertEqual(Success(id="leaf-id").get_program(), "success $leaf-id")
-        self.assertEqual(Action(lambda: True, id="work-id").get_program(), "action $work-id")
+    def test_program_round_trips_ids(self):
+        self.assertEqual(Success(id="leaf-id").get_program(), "success #leaf-id")
+        self.assertEqual(Action(lambda: True, id="work-id").get_program(), "action #work-id")
 
-        root = parse_tree("sequence $root-id\n  success #done\n  failure $failure-id\n", {})
+        root = parse_tree("sequence #root-id\n  success #done\n  failure\n", {})
         self.assertEqual(root.id, "root-id")
-        self.assertEqual(root.children()[0].label, "done")
-        self.assertEqual(root.children()[1].id, "failure-id")
+        self.assertEqual(root.children()[0].id, "done")
+        self.assertTrue(root.children()[1].id.startswith("node-"))
+        with self.assertRaises(ValueError):
+            parse_tree("sequence $root-id\n", {})
 
     def test_parser_uses_factories(self):
         made = []
         root = parse_tree("sequence #main\n  $ready\n  fallback\n    success\n    $recover\n", {
-            "ready": lambda: Condition(lambda: True, label="ready"),
+            "ready": lambda: Condition(lambda: True, id="ready"),
             "recover": lambda: Action(lambda: False),
         })
         tree = BehaviorTree(root)
-        self.assertEqual(tree.root.label, "main")
+        self.assertEqual(tree.root.id, "main")
         self.assertEqual(tree.root.tick(), BTResponse.SUCCESS)
         self.assertIn("sequence #main", tree.get_program())
         self.assertFalse(made)
 
     def test_behavior_tree_is_node_with_validated_run_parameters(self):
-        tree = BehaviorTree(Success(id="root"), tick_rate=25, label="tree", id="tree")
+        tree = BehaviorTree(Success(id="root"), tick_rate=25, id="tree")
         self.assertIsInstance(tree, BTNode)
         self.assertEqual(tree.tick_rate, 25.0)
         self.assertFalse(tree.is_active)
@@ -237,7 +234,7 @@ class BehaviorTreeTests(unittest.TestCase):
         calls = [0]
         inner = BehaviorTree(
             Condition(lambda: calls.__setitem__(0, calls[0] + 1) or True),
-            label="inner",
+            id="inner",
         )
         outer = BehaviorTree(Sequence((inner,)))
 
@@ -298,7 +295,7 @@ class BehaviorTreeTests(unittest.TestCase):
         inner = BehaviorTree(
             Condition(lambda: inner_ticks.__setitem__(0, inner_ticks[0] + 1) or True),
             tick_rate=100,
-            label="inner",
+            id="inner",
         )
         outer = BehaviorTree(
             Sequence((
@@ -343,33 +340,33 @@ class BehaviorTreeTests(unittest.TestCase):
         tree.halt()
 
     def test_replacement_is_safe_while_scheduler_is_active(self):
-        old = Running(label="old")
+        old = Running(id="old")
         tree = BehaviorTree(old, tick_rate=100)
         tree.start()
         self.assertTrue(wait_until(lambda: old.get_status() == BTStatus.RUNNING))
 
-        tree.replace(Success(label="new"), label="old")
+        tree.replace(Success(id="new"), "old")
         self.assertEqual(tree.revision, 1)
         self.assertTrue(tree.is_active)
         self.assertEqual(old.get_status(), BTStatus.SKIPPED)
         self.assertTrue(wait_until(lambda: tree.get_status() == BTStatus.SUCCESS))
-        self.assertEqual(tree.find(label="new").get_status(), BTStatus.SUCCESS)
+        self.assertEqual(tree.find("new").get_status(), BTStatus.SUCCESS)
         tree.halt()
 
     def test_replacing_inside_active_nested_tree_stops_old_scheduler(self):
-        retained = Condition(lambda: True, label="retained")
-        old = Running(label="old")
+        retained = Condition(lambda: True, id="retained")
+        old = Running(id="old")
         inner = BehaviorTree(Sequence((retained, old)), tick_rate=100)
         outer = BehaviorTree(Sequence((inner,)), tick_rate=100)
         outer.start()
         self.assertTrue(wait_until(lambda: inner.is_active))
         self.assertTrue(wait_until(lambda: old.get_status() == BTStatus.RUNNING))
 
-        outer.replace(Success(label="new"), label="old")
+        outer.replace(Success(id="new"), "old")
         self.assertFalse(inner.is_active)
         self.assertEqual(inner.get_status(), BTStatus.SKIPPED)
         self.assertEqual(old.get_status(), BTStatus.SKIPPED)
-        self.assertIs(outer.find(label="retained"), retained)
+        self.assertIs(outer.find("retained"), retained)
         self.assertTrue(wait_until(lambda: outer.get_status() == BTStatus.SUCCESS))
         outer.halt()
 

@@ -43,15 +43,22 @@ def _walk_description(node: dict):
 
 
 class BTServer(rx.Field):
-    """Expose one local behavior tree through ROS services and tooling topics."""
+    """Expose a local tree, optionally scoped under ``namespace``.
+
+    Accept a tree or owner-taking factory directly, or use
+    ``@BTServer`` / ``@BTServer(namespace="bt")`` on a factory method.
+    Without a namespace, endpoints are scoped directly under the owner.
+    """
 
     def __init__(
         self,
-        behavior: BTNode | BehaviorTree | str | Callable = "tree",
+        behavior: BTNode | BehaviorTree | Callable | None = None,
         *,
-        name: str | None = "bt",
+        namespace: str | None = None,
     ):
-        super().__init__(name=name)
+        if behavior is not None and not isinstance(behavior, BTNode) and not callable(behavior):
+            raise TypeError("BTServer behavior must be a BTNode or an owner-taking factory")
+        super().__init__(name=namespace)
         self._behavior = behavior
         self.tree: BehaviorTree | None = None
 
@@ -80,25 +87,14 @@ class BTServer(rx.Field):
         )
         self._snapshot_service = rx.add(snapshot_service, self)
 
-    def __rosonic_register__(self, owner, *, name: str | None = None):
-        resource_name = self.__rosonic_name__ if name is None else name
-        for resource in owner.__rosonic_resources__:
-            if (
-                resource is not self
-                and resource.__rosonic_name__ == resource_name
-            ):
-                raise RuntimeError(
-                    f"Rosonic resource name {resource_name!r} is already registered"
-                )
-        if name is None:
-            return super().__rosonic_register__(owner)
-        return super().__rosonic_register__(owner, name=name)
+    def __call__(self, factory: Callable) -> BTServer:
+        """Bind the decorated factory; startup calls it with the owner."""
+        self._behavior = factory
+        return self
 
     def on_startup(self) -> None:
         behavior = self._behavior
-        if isinstance(behavior, str):
-            behavior = getattr(self.owner, behavior)
-        elif callable(behavior) and not isinstance(behavior, BTNode):
+        if callable(behavior) and not isinstance(behavior, BTNode):
             behavior = behavior(self.owner)
         if not isinstance(behavior, BTNode):
             raise TypeError("BTServer behavior must resolve to BTNode or BehaviorTree")
@@ -189,13 +185,12 @@ class RemoteBT(BTNode, rx.Resource):
         endpoint: str,
         *,
         timeout: float = 1.0,
-        label: str | None = None,
         id: str | None = None,
         clock: Callable[[], float] = time.monotonic,
     ):
         if timeout <= 0:
             raise ValueError("timeout must be positive")
-        BTNode.__init__(self, label=label, id=id)
+        BTNode.__init__(self, id=id)
         rx.Resource.__init__(self, name=_remote_namespace(endpoint))
         self._timeout = timeout
         self._clock = clock

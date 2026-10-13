@@ -26,8 +26,8 @@ ready = True
 tree = BehaviorTree(
     Sequence(
         (
-            Condition(lambda: ready, label="ready"),
-            Action(lambda: print("Working"), label="work"),
+            Condition(lambda: ready, id="ready"),
+            Action(lambda: print("Working"), id="work"),
         )
     )
 )

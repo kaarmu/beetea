@@ -148,6 +148,8 @@ class _Resource:
             return ""
         name = self.__rosonic_name__
         parent = self.__rosonic_owner__.__rosonic_relname__
+        if name is None:
+            return parent
         if name.startswith(("/", "~")):
             return name
         return name if not parent else f"{parent}/{name}"
@@ -591,7 +593,7 @@ class _CountingNode(BTNode):
 
 
 def _make_server(node, behavior, namespace="/worker/bt"):
-    return bt_ros.rx.add(bt_ros.BTServer(behavior, name=namespace), node)
+    return bt_ros.rx.add(bt_ros.BTServer(behavior, namespace=namespace), node)
 
 
 def _success(response):
@@ -600,6 +602,35 @@ def _success(response):
 
 
 class BehaviorTreeROSTests(unittest.TestCase):
+    def test_server_rejects_attribute_names(self):
+        with self.assertRaisesRegex(TypeError, "owner-taking factory"):
+            bt_ros.BTServer("tree")
+
+    def test_server_decorators_resolve_factory_at_startup(self):
+        for namespace in (None, "bt"):
+            with self.subTest(namespace=namespace):
+                def factory(owner):
+                    return owner.delivery_tree
+
+                server = (
+                    bt_ros.BTServer(factory) if namespace is None
+                    else bt_ros.BTServer(namespace=namespace)(factory)
+                )
+
+                class Worker(_Node):
+                    init_bt = server
+
+                node = Worker("worker")
+                self.assertIsNone(server.tree)
+                node.delivery_tree = BehaviorTree(Running())
+                node.__rosonic_startup__(node)
+                self.assertIs(server.tree, node.delivery_tree)
+                prefix = "bt/" if namespace else ""
+                self.assertEqual(
+                    server._tick_service.__rosonic_relname__, prefix + "tick"
+                )
+                node.__rosonic_shutdown__(node)
+
     def test_adapters_are_rosonic_resources_with_scoped_names(self):
         node = _Node()
         server = _make_server(node, Running())
@@ -630,7 +661,7 @@ class BehaviorTreeROSTests(unittest.TestCase):
     def test_adapter_resources_defer_until_node_startup(self):
         node = _Node(autostart=False)
         server = bt_ros.rx.add(
-            bt_ros.BTServer(Running(), name="/worker/bt"), node
+            bt_ros.BTServer(Running(), namespace="/worker/bt"), node
         )
 
         self.assertIsNone(server._tick_service.service)
@@ -665,15 +696,6 @@ class BehaviorTreeROSTests(unittest.TestCase):
         )
         self.assertEqual(response.response, int(BTResponse.RUNNING))
         bt_ros.rx.remove(second, node)
-
-    def test_server_rejects_a_duplicate_resource_name(self):
-        node = _Node()
-        first = _make_server(node, Running())
-
-        with self.assertRaisesRegex(RuntimeError, "already registered"):
-            _make_server(node, Running())
-
-        bt_ros.rx.remove(first, node)
 
     def test_remote_tick_consumes_service_result_on_next_parent_tick(self):
         bus = _Bus()
